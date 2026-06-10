@@ -1290,6 +1290,32 @@ async function submitNewProject(){
   openWorkspace(id);
 }
 
+// Populate an existing (empty) project with the standard template tasks
+async function seedTemplateTasksForCurrentProject(){
+  if(appMode!=='project'||!currentProjectId)return;
+  if(!canManageProject())return;
+  if(!confirm('Load the standard ALUM template ('+TASKS_RAW.length+' tasks) into this project? This is meant for projects that currently have no tasks.'))return;
+
+  const btn=document.getElementById('seed-template-btn');
+  if(btn){btn.disabled=true;btn.textContent='Loading tasks…';}
+
+  const clonedTasks=TASKS_RAW.map(t=>({
+    ...t,
+    deps:[...t.deps],
+    phase:t.phase||getPhase(t.monthsOut),
+    status:'Not Started',
+    responsible:t.responsible||'',
+    duration:null,
+    _custom:false
+  }));
+
+  await _seedTasksToSupabase(currentProjectId,clonedTasks);
+  TASKS=clonedTasks;
+  _rebuildMap();
+  localStorage.setItem(_projectTasksKey(),JSON.stringify(_taskRowsForStorage()));
+  render();
+}
+
 // ── PHASE FILTER BAR (shared) ─────────────────────────────
 function buildPhaseBar(currentFilter,onSelect){
   const bar=document.createElement('div');
@@ -1320,6 +1346,28 @@ function buildPhaseBar(currentFilter,onSelect){
 function buildDashboard(){
   const wrap=document.createElement('div');
   wrap.className='dash-wrap';
+
+  // ── Empty-project banner ──
+  if(TASKS.length===0){
+    const empty=document.createElement('div');
+    empty.className='dash-card';
+    if(canManageProject()){
+      empty.innerHTML=`
+        <div style="text-align:center;padding:24px 12px;">
+          <div style="font-size:18px;font-weight:700;margin-bottom:8px;">This project has no tasks yet</div>
+          <div style="color:#718096;margin-bottom:16px;">Load the standard ALUM template (${TASKS_RAW.length} tasks across all disciplines) to get started, or add tasks manually with "+ New Task".</div>
+          <button id="seed-template-btn" class="np-btn-primary" onclick="seedTemplateTasksForCurrentProject()">Load Template Tasks</button>
+        </div>`;
+    }else{
+      empty.innerHTML=`
+        <div style="text-align:center;padding:24px 12px;">
+          <div style="font-size:18px;font-weight:700;margin-bottom:8px;">This project has no tasks yet</div>
+          <div style="color:#718096;">Ask the project owner to load the template tasks to get started.</div>
+        </div>`;
+    }
+    wrap.appendChild(empty);
+    return wrap;
+  }
 
   // Phase bar
   wrap.appendChild(buildPhaseBar(phaseFilter,(ph)=>{
