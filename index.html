@@ -66,6 +66,8 @@ td.td-date{white-space:nowrap;color:#4a5568;font-size:11px}
 td.td-resp{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 td.td-resp input{width:100%;border:none;background:transparent;font-size:12px;color:#1a1a2e;padding:0;cursor:text}
 td.td-resp input:focus{outline:1px solid #e94560;border-radius:3px;padding:1px 3px;background:#fff}
+td.td-resp select{width:100%;border:none;background:transparent;font-size:12px;color:#1a1a2e;padding:0;cursor:pointer}
+td.td-resp select:focus{outline:1px solid #e94560;border-radius:3px}
 td.td-deps{max-width:160px}
 .dep-btn{display:inline-block;background:#edf2ff;color:#4c6ef5;border:1px solid #c5d0fa;border-radius:4px;padding:2px 7px;font-size:10px;cursor:pointer;white-space:nowrap}
 .dep-btn:hover{background:#dbe4ff}
@@ -339,6 +341,7 @@ let _taskChannel=null;              // realtime subscription for the open projec
 let _syncTimer=null;
 let _applyingRemote=false;
 let _pendingDeletes=new Set();
+let _projectMembers=[];             // cached list of {email,user_id,role,discipline} for the open project
 
 // ── SUPABASE / AUTH ──────────────────────────────────────
 const SUPABASE_URL='https://vkciqpsdegpsratwgrlq.supabase.co';
@@ -364,6 +367,32 @@ function canCreateTask(disc){
 }
 function canManageProject(){
   return appMode==='template'||currentProjectRole==='owner'||currentProjectRole==='admin';
+}
+
+// ── PROJECT MEMBERS (for "Responsible" assignment) ─────────
+function _emailToName(email){
+  if(!email)return '';
+  const local=email.split('@')[0];
+  return local.split(/[._-]+/).filter(Boolean).map(w=>w.charAt(0).toUpperCase()+w.slice(1)).join(' ');
+}
+async function _loadProjectMembers(projectId){
+  if(!sb||!projectId){_projectMembers=[];return _projectMembers;}
+  const{data,error}=await sb.from('alum_project_members').select('email,user_id,role,discipline').eq('project_id',projectId).order('email');
+  if(error){console.error('ALUM load members error:',error.message);_projectMembers=[];return _projectMembers;}
+  _projectMembers=data||[];
+  return _projectMembers;
+}
+// Build <option> list for a "Responsible" dropdown, preserving any existing
+// value even if that person is no longer (or never was) a project member.
+function _respOptionsHtml(selected){
+  selected=selected||'';
+  let opts='<option value="">— Unassigned —</option>';
+  const emails=_projectMembers.map(m=>m.email);
+  if(selected&&!emails.includes(selected))emails.push(selected);
+  emails.forEach(email=>{
+    opts+=`<option value="${escHtml(email)}"${email===selected?' selected':''}>${escHtml(_emailToName(email)||email)}</option>`;
+  });
+  return opts;
 }
 
 // ── PERSIST / LOAD ───────────────────────────────────────
@@ -727,6 +756,9 @@ async function _refreshAccessList(){
   if(!listEl||!sb||!currentProjectId)return;
   const{data,error}=await sb.from('alum_project_members').select('*').eq('project_id',currentProjectId).order('created_at');
   if(error){listEl.innerHTML=`<div style="color:#e94560;font-size:12px">Error loading members: ${escHtml(error.message)}</div>`;return;}
+  // Keep the "Responsible" assignment dropdowns in sync with current membership
+  await _loadProjectMembers(currentProjectId);
+  if(document.getElementById('tbl-body'))_refreshTableBody(_curAllTasks||TASKS);
   if(!data||data.length===0){listEl.innerHTML=`<div style="font-size:12px;color:#a0aec0">No members yet.</div>`;return;}
   const isOwnerOrAdmin=currentProjectRole==='owner'||currentProjectRole==='admin';
   listEl.innerHTML=data.map(mem=>{
@@ -1038,6 +1070,7 @@ async function openWorkspace(projectId){
     }
     _rebuildMap();
     localStorage.setItem(_projectTasksKey(),JSON.stringify(_taskRowsForStorage()));
+    await _loadProjectMembers(projectId);
 
     const label=(proj&&proj.name)||'Project';
     _buildWorkspaceShell(label);
@@ -1045,6 +1078,7 @@ async function openWorkspace(projectId){
   }else{
     currentProjectRole=null;
     currentProjectDiscipline=null;
+    _projectMembers=[];
     // Reset TASKS to fresh template clone
     TASKS=[...TASKS_RAW.map(t=>({...t,deps:[...t.deps],phase:t.phase||getPhase(t.monthsOut)}))];
     openingDate=new Date('2027-08-01');
@@ -1829,8 +1863,7 @@ function _refreshTableBody(allTasks){
       <td class="td-date" id="end-${t.id}">${endDate}</td>
       <td><input class="dur-input" type="number" min="1" max="999" placeholder="days" ${dis}
         value="${t.duration||''}" onchange="handleDurationChange('${t.id}',this.value)" title="Duration in days"></td>
-      <td class="td-resp"><input type="text" value="${escHtml(t.responsible||'')}" ${dis}
-        placeholder="Assign…" onchange="handleRespChange('${t.id}',this.value)"></td>
+      <td class="td-resp"><select ${dis} onchange="handleRespChange('${t.id}',this.value)">${_respOptionsHtml(t.responsible)}</select></td>
       <td><select class="status-sel ${sCls}" onchange="handleStatusChange(event,'${t.id}')" ${dis}>${statusOptions(t.status)}</select></td>
       <td class="td-deps">${editable?depsCell(t):(t.deps&&t.deps.length?`<div class="dep-chips-cell">${t.deps.map(did=>`<span class="dep-chip-sm">${did}</span>`).join('')}</div>`:'—')}</td>
       <td style="text-align:center"><span class="${cmtCls}" onclick="openTaskModal('${t.id}')" title="Comments">${cmtCount||'💬'}</span></td>
@@ -2206,8 +2239,7 @@ function openTaskModal(taskId){
       <div class="modal-row">
         <div class="modal-field">
           <div class="modal-label">Responsible</div>
-          <input class="modal-input" type="text" value="${escHtml(t.responsible||'')}" placeholder="Assign to…" ${dis}
-            onchange="handleRespChange('${t.id}',this.value)">
+          <select class="modal-input" ${dis} onchange="handleRespChange('${t.id}',this.value)">${_respOptionsHtml(t.responsible)}</select>
         </div>
       </div>
       <div class="modal-field" style="margin-bottom:14px">
@@ -2479,7 +2511,7 @@ function openNewTaskForm(defaults){
       </div>
       <div class="modal-field">
         <div class="modal-label">Responsible</div>
-        <input class="modal-input" id="nt-resp" type="text" placeholder="Assign to…">
+        <select class="modal-input" id="nt-resp">${_respOptionsHtml('')}</select>
       </div>
       <div style="display:flex;gap:10px;margin-top:6px">
         <button class="btn-sm btn-primary" onclick="submitNewTask('${isSubTask?defaults.parentId:''}')">Create Task</button>
