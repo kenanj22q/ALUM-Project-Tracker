@@ -1074,7 +1074,7 @@ async function openWorkspace(projectId){
       // Fallback: local cache (offline) or, for brand-new projects, an empty set
       const cached=localStorage.getItem(_projectTasksKey());
       if(cached){
-        try{TASKS=JSON.parse(cached).map(t=>({...t,deps:t.deps||[]}));}catch(e){TASKS=[];}
+        try{TASKS=JSON.parse(cached).map(t=>({...t,discipline:DISC_ALIASES[t.discipline]||t.discipline,deps:t.deps||[]}));}catch(e){TASKS=[];}
       }else{
         TASKS=[];
       }
@@ -1166,7 +1166,7 @@ async function buildProjectHub(){
     if(ptasks){
       ptasks=ptasks.map(r=>({parentId:r.parent_id,status:r.status,phase:r.phase,monthsOut:r.months_out}));
     }else{
-      try{ptasks=JSON.parse(localStorage.getItem('alum_project_'+proj.id+'_tasks')||'[]');}catch(e){ptasks=[];}
+      try{ptasks=JSON.parse(localStorage.getItem('alum_project_'+proj.id+'_tasks')||'[]').map(t=>({...t,discipline:DISC_ALIASES[t.discipline]||t.discipline}));}catch(e){ptasks=[];}
     }
     const parents=ptasks.filter(t=>!t.parentId);
     const total=parents.length||ptasks.length;
