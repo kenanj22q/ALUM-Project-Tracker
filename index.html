@@ -306,6 +306,182 @@ const TASKS_RAW=[{"id":"ENG-001","discipline":"Engineering","item":"Code/Regulat
 const DISCIPLINES=["Development & Construction","Engineering","Brand Ops","Finance & Accounting","F&B","Hotel Ops","Human Resources","IT","Payroll","Rev Management","Sales Team","Security","Site Leadership","Partnerships","Condo Sales"];
 // Legacy discipline name aliases — tasks stored in Supabase under old names are remapped on load
 const DISC_ALIASES={'Event & Marketing':'Brand Ops'};
+
+// ── ACTIVITY LOG ──────────────────────────────────────────────────────────────
+// Fire-and-forget — never blocks the UI, silently swallows errors
+async function _logActivity(action, taskId, taskItem, details){
+  if(!sb||!currentProjectId)return;
+  try{
+    const email=getCurrentUser();
+    if(!email||email==='You')return;
+    await sb.from('alum_activity_log').insert({
+      project_id:currentProjectId,
+      user_email:email,
+      user_name:_emailToName(email)||email,
+      action,
+      task_id:taskId||null,
+      task_item:taskItem||null,
+      details:details||null
+    });
+  }catch(e){/* silent */}
+}
+
+// Open the owner-only activity log modal
+async function openActivityLog(){
+  if(currentProjectRole!=='owner')return;
+  const bg=document.createElement('div');
+  bg.id='act-log-bg';
+  bg.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;display:flex;align-items:flex-start;justify-content:flex-end;padding:0';
+  bg.onclick=e=>{if(e.target===bg)bg.remove();};
+
+  const panel=document.createElement('div');
+  panel.style.cssText='background:#fff;width:520px;height:100vh;overflow-y:auto;box-shadow:-4px 0 24px rgba(0,0,0,.2);display:flex;flex-direction:column';
+  panel.innerHTML=`
+    <div style="background:linear-gradient(135deg,#1a1a2e,#0f3460);padding:18px 20px;flex-shrink:0">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="color:#e94560;font-size:13px;font-weight:800;letter-spacing:1px">ACTIVITY LOG</div>
+          <div style="color:#fff;font-size:16px;font-weight:700;margin-top:2px">Owner View Only</div>
+        </div>
+        <button onclick="document.getElementById('act-log-bg').remove()"
+          style="background:rgba(255,255,255,.15);border:none;color:#fff;width:30px;height:30px;
+                 border-radius:50%;cursor:pointer;font-size:16px;line-height:1">✕</button>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <select id="act-filter-user" onchange="_renderActLog()"
+          style="flex:1;padding:6px 8px;border-radius:6px;border:none;font-size:12px;background:rgba(255,255,255,.15);color:#fff">
+          <option value="">All Users</option>
+        </select>
+        <select id="act-filter-action" onchange="_renderActLog()"
+          style="flex:1;padding:6px 8px;border-radius:6px;border:none;font-size:12px;background:rgba(255,255,255,.15);color:#fff">
+          <option value="">All Actions</option>
+          <option value="task_status_changed">Status changes</option>
+          <option value="task_responsible_changed">Assignments</option>
+          <option value="task_created">Tasks created</option>
+          <option value="task_deleted">Tasks deleted</option>
+          <option value="comment_added">Comments</option>
+          <option value="project_opened">Logins / Opens</option>
+        </select>
+      </div>
+    </div>
+    <div id="act-log-body" style="flex:1;padding:16px 20px;font-size:13px">
+      <div style="color:#a0aec0;text-align:center;padding:40px 0">Loading…</div>
+    </div>`;
+  bg.appendChild(panel);
+  document.body.appendChild(bg);
+
+  // Load log entries
+  let entries=[];
+  try{
+    const {data,error}=await sb.from('alum_activity_log')
+      .select('*').eq('project_id',currentProjectId)
+      .order('created_at',{ascending:false}).limit(500);
+    if(!error) entries=data||[];
+  }catch(e){
+    document.getElementById('act-log-body').innerHTML=
+      '<div style="color:#e53e3e;text-align:center;padding:40px">Failed to load log.</div>';
+    return;
+  }
+
+  // Populate user filter
+  const users=[...new Set(entries.map(e=>e.user_name||e.user_email))].sort();
+  const uSel=document.getElementById('act-filter-user');
+  users.forEach(u=>{const o=document.createElement('option');o.value=u;o.textContent=u;uSel.appendChild(o);});
+
+  window._actLogEntries=entries;
+  _renderActLog();
+}
+
+const _ACT_LABELS={
+  task_status_changed:   {icon:'🔄',color:'#3182ce',label:'Status changed'},
+  task_responsible_changed:{icon:'👤',color:'#553c9a',label:'Assigned'},
+  task_created:          {icon:'✅',color:'#38a169',label:'Task created'},
+  task_deleted:          {icon:'🗑',color:'#e53e3e', label:'Task deleted'},
+  comment_added:         {icon:'💬',color:'#d69e2e',label:'Commented'},
+  project_opened:        {icon:'👁',color:'#718096',label:'Opened project'},
+};
+
+function _renderActLog(){
+  const body=document.getElementById('act-log-body');
+  if(!body||!window._actLogEntries)return;
+  const uF=document.getElementById('act-filter-user');
+  const aF=document.getElementById('act-filter-action');
+  const uVal=uF?uF.value:'';
+  const aVal=aF?aF.value:'';
+
+  let rows=window._actLogEntries.filter(e=>
+    (!uVal||(e.user_name||e.user_email)===uVal)&&
+    (!aVal||e.action===aVal)
+  );
+
+  if(!rows.length){
+    body.innerHTML='<div style="color:#a0aec0;text-align:center;padding:40px 0">No activity found.</div>';
+    return;
+  }
+
+  // Group by calendar date
+  const byDay={};
+  rows.forEach(e=>{
+    const d=new Date(e.created_at);
+    const key=d.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+    if(!byDay[key])byDay[key]=[];
+    byDay[key].push(e);
+  });
+
+  let html='';
+  Object.entries(byDay).forEach(([day,events])=>{
+    html+=`<div style="font-size:10px;font-weight:700;color:#a0aec0;text-transform:uppercase;
+                       letter-spacing:1px;margin:18px 0 8px;padding-bottom:4px;
+                       border-bottom:1px solid #e2e8f0">${day}</div>`;
+    events.forEach(e=>{
+      const meta=_ACT_LABELS[e.action]||{icon:'•',color:'#a0aec0',label:e.action};
+      const time=new Date(e.created_at).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+      const initials=(e.user_name||e.user_email||'?').split(/\s+/).map(w=>w[0]).join('').slice(0,2).toUpperCase();
+      const desc=_actDesc(e);
+      html+=`<div style="display:flex;gap:10px;margin-bottom:12px;align-items:flex-start">
+        <div style="width:30px;height:30px;border-radius:50%;background:${meta.color}20;
+                    color:${meta.color};font-size:11px;font-weight:700;display:flex;
+                    align-items:center;justify-content:center;flex-shrink:0">${initials}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;align-items:baseline">
+            <span style="font-weight:700;color:#1a1a2e;font-size:12px">${escHtml(e.user_name||e.user_email)}</span>
+            <span style="color:#a0aec0;font-size:10px;flex-shrink:0;margin-left:8px">${time}</span>
+          </div>
+          <div style="margin-top:2px;color:#4a5568;font-size:12px;line-height:1.4">${desc}</div>
+          ${e.task_item?`<div style="margin-top:3px;font-size:11px;color:#718096;
+            background:#f7fafc;padding:2px 6px;border-radius:4px;display:inline-block;
+            max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${escHtml(e.task_item)}">${escHtml(e.task_item)}</div>`:''}
+        </div>
+      </div>`;
+    });
+  });
+  body.innerHTML=html;
+}
+
+function _actDesc(e){
+  const d=e.details||{};
+  const icon=(_ACT_LABELS[e.action]||{}).icon||'•';
+  switch(e.action){
+    case 'task_status_changed':
+      return `${icon} <b>${escHtml(d.old||'?')}</b> → <b style="color:#3182ce">${escHtml(d.new||'?')}</b>`+
+             (d.discipline?` <span style="color:#a0aec0">(${escHtml(d.discipline)})</span>`:'');
+    case 'task_responsible_changed':
+      return `${icon} Assigned to <b style="color:#553c9a">${escHtml(d.new||'Unassigned')}</b>`+
+             (d.old?` <span style="color:#a0aec0">(was: ${escHtml(d.old)})</span>`:'');
+    case 'task_created':
+      return `${icon} Created task in <b style="color:#38a169">${escHtml(d.discipline||'?')}</b>`;
+    case 'task_deleted':
+      return `${icon} <span style="color:#e53e3e">Deleted task</span>`+
+             (d.discipline?` <span style="color:#a0aec0">(${escHtml(d.discipline)})</span>`:'');
+    case 'comment_added':
+      return `${icon} "${escHtml((d.comment||'').slice(0,80))}${(d.comment||'').length>80?'…':''}"`;
+    case 'project_opened':
+      return `${icon} Opened this project`;
+    default:
+      return `${icon} ${escHtml(e.action)}`;
+  }
+}
 const DISC_COLORS={"Development & Construction": "#ed8936", "Engineering": "#e94560", "Brand Ops": "#f6ad55", "Finance & Accounting": "#68d391", "F&B": "#5a67d8", "Hotel Ops": "#63b3ed", "Human Resources": "#b794f4", "IT": "#fc8181", "Payroll": "#fbd38d", "Rev Management": "#9decf9", "Sales Team": "#f687b3", "Security": "#a0aec0", "Site Leadership": "#76e4f7", "Partnerships": "#319795", "Condo Sales": "#d53f8c"};
 const DISC_PREFIXES={"Development & Construction": "DC", "Engineering": "ENG", "Brand Ops": "BRD", "Finance & Accounting": "FIN", "F&B": "FNB", "Hotel Ops": "OPS", "Human Resources": "HR", "IT": "IT", "Payroll": "PAY", "Rev Management": "REV", "Sales Team": "SAL", "Security": "SEC", "Site Leadership": "SLD", "Partnerships": "PTN", "Condo Sales": "CON"};
 const PHASES=['Discovery & Acquisition','Development','Construction','Pre-Opening','Grand Opening'];
@@ -640,6 +816,7 @@ function _buildWorkspaceShell(label){
   const newTaskBtn=canCreateTask()?`<button class="btn-new" onclick="openNewTaskForm(null)">+ New Task</button>`:'';
   const accessBtn=(appMode==='project'&&canManageProject())?`<button class="btn-new" style="background:#1a1a2e" onclick="openManageAccessModal()">👥 Manage Access</button>`:'';
   const syncBtn=(appMode==='project'&&canManageProject())?`<button class="btn-new" style="background:#0f3460" onclick="addMissingTemplateTasksForCurrentProject()" title="Add any new template tasks that aren't in this project yet, without touching existing tasks">⬇ Sync New Tasks</button>`:'';
+  const activityBtn=(appMode==='project'&&currentProjectRole==='owner')?`<button class="btn-new" style="background:#553c9a" onclick="openActivityLog()" title="View full activity log — visible to you only">📋 Activity Log</button>`:'';
   const roleBadge=(appMode==='project'&&currentProjectRole)?`<span style="font-size:10px;font-weight:700;color:#a0aec0;text-transform:uppercase;letter-spacing:.5px;border:1px solid rgba(255,255,255,.2);border-radius:12px;padding:3px 9px">${currentProjectRole}${currentProjectDiscipline?' · '+escHtml(currentProjectDiscipline):''}</span>`:'';
   app.innerHTML=`
 <div id="hdr">
@@ -662,6 +839,7 @@ function _buildWorkspaceShell(label){
     ${roleBadge}
     <div class="user-av" id="hdr-user-av" onclick="toggleUserMenu(event)">Y</div>
     <span id="hdr-user-name" onclick="toggleUserMenu(event)">You</span>
+    ${activityBtn}
     ${accessBtn}
     ${syncBtn}
     ${newTaskBtn}
@@ -1082,6 +1260,7 @@ async function openWorkspace(projectId){
     _rebuildMap();
     localStorage.setItem(_projectTasksKey(),JSON.stringify(_taskRowsForStorage()));
     await _loadProjectMembers(projectId);
+    _logActivity('project_opened',null,null,null);
 
     const label=(proj&&proj.name)||'Project';
     _buildWorkspaceShell(label);
@@ -2008,14 +2187,20 @@ function escHtml(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').re
 // ── STATUS HANDLER ────────────────────────────────────────
 function handleStatusChange(event,taskId){
   const t=TASK_MAP[taskId];if(!t)return;
+  const oldStatus=t.status;
   t.status=event.target.value;
   event.target.className='status-sel '+statusClass(t.status);
   _persist();
+  if(oldStatus!==t.status)
+    _logActivity('task_status_changed',t.id,t.item,{old:oldStatus,new:t.status,discipline:t.discipline});
 }
 function handleRespChange(taskId,val){
   const t=TASK_MAP[taskId];if(!t)return;
+  const oldResp=t.responsible;
   t.responsible=val;
   _persist();
+  if(oldResp!==val)
+    _logActivity('task_responsible_changed',t.id,t.item,{old:oldResp,new:val,discipline:t.discipline});
 }
 function handleItemChange(taskId,val){
   const t=TASK_MAP[taskId];if(!t)return;
@@ -2157,6 +2342,7 @@ function deleteTask(tid){
     ?`Delete "${t.item}" and its ${childCount} sub-task(s)?`
     :`Delete "${t.item}"?`;
   if(!confirm(msg))return;
+  _logActivity('task_deleted',t.id,t.item,{discipline:t.discipline});
   // Remove children
   TASKS=TASKS.filter(c=>c.parentId!==tid);
   // Remove task
@@ -2513,8 +2699,11 @@ function submitComment(tid){
   const cmts=_ldC(tid);
   const now=new Date();
   const ts=now.toLocaleDateString('en-US',{month:'short',day:'numeric'})+' '+now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
-  cmts.push({id:'c'+Date.now(),tid,user:getCurrentUser(),ts,text:inp.value.trim()});
+  const cmtText=inp.value.trim();
+  cmts.push({id:'c'+Date.now(),tid,user:getCurrentUser(),ts,text:cmtText});
   _svC(tid,cmts);
+  const cmtTask=TASK_MAP[tid];
+  _logActivity('comment_added',tid,cmtTask?cmtTask.item:tid,{comment:cmtText.slice(0,120),discipline:cmtTask?cmtTask.discipline:null});
   inp.value='';
   _rfThread(tid);
   _rfBadge(tid);
@@ -2651,6 +2840,7 @@ function submitNewTask(parentId){
   };
   TASKS.push(task);
   TASK_MAP[task.id]=task;
+  _logActivity('task_created',task.id,task.item,{discipline:task.discipline});
   _persist();
   closeNewTaskForm();
   // Switch to the right view
